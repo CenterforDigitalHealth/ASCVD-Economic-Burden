@@ -56,10 +56,3 @@ After `bash run.sh all`, key outputs are:
 ### `tables/`
 
 - `Table_ALL.csv`
-
-## Table1 interval behavior (`totalloss`, `pc_loss`, `tax %`)
-
-Table1 uses:
-
-- `val` as the central estimate
-- `lower` and `upper` as interval bounds
