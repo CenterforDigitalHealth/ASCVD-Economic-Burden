@@ -13,6 +13,7 @@ DISEASE_ALIASES = {
     'IS': 'Ischemic stroke',
     'PAD': 'Lower extremity peripheral arterial disease',
 }
+DISEASE_NAME_TO_ALIAS = {v.lower(): k for k, v in DISEASE_ALIASES.items()}
 
 
 def read_csv_safe(path, **kwargs):
@@ -50,8 +51,76 @@ def filter_df_by_disease(df, disease_arg):
     return df[df['disease'].isin(selected)].copy()
 
 
+def normalize_output_tag(output_tag, disease='all'):
+    candidate = output_tag
+    if candidate is None or str(candidate).strip() == '':
+        candidate = disease
+
+    text = str(candidate).strip()
+    if text == '' or text.lower() == 'all':
+        return 'ALL'
+
+    tags = []
+    for token in text.split(','):
+        token = token.strip()
+        if token == '':
+            continue
+        lower_token = token.lower()
+        if lower_token == 'all':
+            mapped = 'ALL'
+        elif token.upper() in DISEASE_ALIASES:
+            mapped = token.upper()
+        elif lower_token in DISEASE_NAME_TO_ALIAS:
+            mapped = DISEASE_NAME_TO_ALIAS[lower_token]
+        else:
+            safe = []
+            for ch in token:
+                if ch.isalnum() or ch in ['_', '-']:
+                    safe.append(ch.upper())
+                elif ch in [' ', '/']:
+                    safe.append('_')
+            mapped = ''.join(safe).strip('_')
+            while '__' in mapped:
+                mapped = mapped.replace('__', '_')
+        if mapped != '':
+            tags.append(mapped)
+
+    if len(tags) == 0:
+        return 'ALL'
+
+    dedup = []
+    seen = set()
+    for tag in tags:
+        if tag in seen:
+            continue
+        seen.add(tag)
+        dedup.append(tag)
+    return '_'.join(dedup)
+
+
+def format_value(value, digits):
+    if pd.isna(value):
+        return ''
+    rounded = round(float(value), digits)
+    if digits == 0:
+        return str(int(rounded))
+    return str(rounded)
+
+
+def format_interval(mean_value, lower_value, upper_value, digits=0, scale=1.0):
+    if pd.isna(mean_value):
+        return ''
+    mean_text = format_value(scale * mean_value, digits)
+    if pd.isna(lower_value) or pd.isna(upper_value):
+        return mean_text
+    lower_text = format_value(scale * lower_value, digits)
+    upper_text = format_value(scale * upper_value, digits)
+    return f"{mean_text}({lower_text}-{upper_text})"
+
+
 class Tables():
-    def __init__(self, discount=0.02, informal=0.11, filename='results/aggregate_results_imputed.csv', disease='all'):
+    def __init__(self, discount=0.02, informal=0.11, filename='results/aggregate_results_imputed.csv',
+                 disease='all', output_tag=None):
         self.df_input = read_csv_safe(filename)
         self.df_input = filter_df_by_disease(self.df_input, disease)
         if len(self.df_input) == 0:
@@ -61,6 +130,7 @@ class Tables():
             discount = 0
         self.default_discount = discount
         self.default_informal = informal
+        self.output_tag = normalize_output_tag(output_tag, disease=disease)
         os.makedirs('tables', exist_ok=True)
         self.set_state()
         self.set_params()
@@ -178,38 +248,75 @@ class Tables():
         return country
 
     def generate_table1(self):
-        identify =['Country Code', 'disease']
+        table1_path = f"tables/Table1_{self.output_tag}.csv"
+        identify = ['Country Code', 'disease']
         scenario_groups = {}
         for scenario in ['lower', 'upper', 'val']:
-            self.set_state(state={'ConsiderTC':1, 'ConsiderMB':1, 'scenario':scenario})
+            self.set_state(state={'ConsiderTC': 1, 'ConsiderMB': 1, 'scenario': scenario})
             self.get_data()
             group = self.get_group_data(identify)
             if len(group) == 0:
-                scenario_groups[scenario] = pd.DataFrame(columns=['GDPloss', 'tax', 'pc_loss'])
+                scenario_groups[scenario] = pd.DataFrame(columns=['Country Code', 'GDPloss', 'tax', 'pc_loss'])
             else:
-                scenario_groups[scenario] = group.groupby('Country Code')[['GDPloss', 'tax', 'pc_loss']].sum()
+                scenario_groups[scenario] = group.groupby('Country Code', as_index=False)[['GDPloss', 'tax', 'pc_loss']].sum()
 
         base = scenario_groups['val']
+        if len(base) == 0 and len(scenario_groups['lower']) > 0:
+            base = scenario_groups['lower']
+        if len(base) == 0 and len(scenario_groups['upper']) > 0:
+            base = scenario_groups['upper']
         if len(base) == 0:
             columns = ['Region', 'country', 'WBCountry', 'totalloss', 'pc_loss', 'tax %']
-            pd.DataFrame(columns=columns).to_csv('tables/Table1_informal%s_discount%s.csv'%(self.default_informal, self.default_discount), index=False)
+            pd.DataFrame(columns=columns).to_csv(table1_path, index=False)
             return
 
-        lower = scenario_groups['lower'] if len(scenario_groups['lower']) > 0 else base.copy()
-        upper = scenario_groups['upper'] if len(scenario_groups['upper']) > 0 else base.copy()
-        
-        df = base.merge(upper,on='Country Code',suffixes=('', '_upper'))
-        df= df.merge(lower,on='Country Code',suffixes=('', '_lower'))
+        lower = scenario_groups['lower'].rename(columns={
+            'GDPloss': 'GDPloss_lower',
+            'tax': 'tax_lower',
+            'pc_loss': 'pc_loss_lower',
+        })
+        upper = scenario_groups['upper'].rename(columns={
+            'GDPloss': 'GDPloss_upper',
+            'tax': 'tax_upper',
+            'pc_loss': 'pc_loss_upper',
+        })
+
+        df = base.merge(lower, on='Country Code', how='left')
+        df = df.merge(upper, on='Country Code', how='left')
         df = df.merge(self.countries_info, on='Country Code')
-        # pdb.set_trace()
         data = df.copy()
-        data['totalloss'] = data.apply(lambda row: str(round(1000*row['GDPloss']))+'('+ str(round(1000*row['GDPloss_lower']))+'-'+str(round(1000*row['GDPloss_upper']))+')', axis=1)
-        # data['tax ‰'] = data.apply(lambda row: str(round(row['tax'],3))+'('+ str(round(row['tax_lower'],3))+'-'+str(round(row['tax_upper'],3))+')', axis=1)
-        data['tax %'] = data.apply(lambda row: str(round(row['tax'],2))+'('+ str(round(row['tax_lower'],2))+'-'+str(round(row['tax_upper'],2))+')', axis=1)
-        data['pc_loss'] = data.apply(lambda row: str(round(row['pc_loss']))+'('+ str(round(row['pc_loss_lower']))+'-'+str(round(row['pc_loss_upper']))+')', axis=1)
-        data = data.sort_values(['Region','country'])[['Region','country', 'WBCountry', 'totalloss','pc_loss','tax %']]
-        # df.reset_index().to_csv('tables/tmp_Table1_informal%s_discount%s.csv'%(self.state['informal'], self.state['discount']), index=False, float_format='%.3f')
-        data.to_csv('tables/Table1_informal%s_discount%s.csv'%(self.state['informal'], self.state['discount']), index=False)
+        data['totalloss'] = data.apply(
+            lambda row: format_interval(
+                row['GDPloss'],
+                row.get('GDPloss_lower', np.nan),
+                row.get('GDPloss_upper', np.nan),
+                digits=0,
+                scale=1000.0,
+            ),
+            axis=1,
+        )
+        data['tax %'] = data.apply(
+            lambda row: format_interval(
+                row['tax'],
+                row.get('tax_lower', np.nan),
+                row.get('tax_upper', np.nan),
+                digits=2,
+                scale=1.0,
+            ),
+            axis=1,
+        )
+        data['pc_loss'] = data.apply(
+            lambda row: format_interval(
+                row['pc_loss'],
+                row.get('pc_loss_lower', np.nan),
+                row.get('pc_loss_upper', np.nan),
+                digits=0,
+                scale=1.0,
+            ),
+            axis=1,
+        )
+        data = data.sort_values(['Region', 'country'])[['Region', 'country', 'WBCountry', 'totalloss', 'pc_loss', 'tax %']]
+        data.to_csv(table1_path, index=False)
 
     def generate_table2(self):
         identify =['Region', 'disease']
@@ -352,9 +459,20 @@ if __name__ == "__main__":
     parser.add_argument('-i', '--informal', type=float, default=0.11) # or 0, 0.05, 0.11, 0.23
     parser.add_argument('--disease', type=str, default='all',
                         help='Disease selector: all, IHD, IS, PAD, full disease name, or comma-separated list')
+    parser.add_argument('--output-tag', type=str, default=None,
+                        help='Optional output tag for table file names (e.g., ALL, IHD, IS, PAD)')
+    parser.add_argument('--only-table1', action='store_true',
+                        help='Generate only Table1')
     args = parser.parse_args()
     # In[19]:
-    mytable = Tables(discount=args.discount, informal=args.informal, filename=args.filename, disease=args.disease)
+    mytable = Tables(
+        discount=args.discount,
+        informal=args.informal,
+        filename=args.filename,
+        disease=args.disease,
+        output_tag=args.output_tag,
+    )
     mytable.generate_table1()
-    mytable.generate_table2()
-    mytable.generate_table3()
+    if not args.only_table1:
+        mytable.generate_table2()
+        mytable.generate_table3()

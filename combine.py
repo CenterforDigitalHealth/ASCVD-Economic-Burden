@@ -13,11 +13,43 @@ DISEASE_ALIASES = {
 }
 
 
-def find_result_files(folder, prefix):
+def normalize_file_tag(file_tag):
+    if file_tag is None:
+        return None
+    tag = str(file_tag).strip()
+    if tag == '':
+        return None
+    if tag.lower() == 'all':
+        return 'ALL'
+    safe = []
+    for ch in tag:
+        if ch.isalnum() or ch in ['_', '-']:
+            safe.append(ch.upper())
+        elif ch in [',', ' ', '/']:
+            safe.append('_')
+    safe_tag = ''.join(safe).strip('_')
+    while '__' in safe_tag:
+        safe_tag = safe_tag.replace('__', '_')
+    return safe_tag if safe_tag != '' else None
+
+
+def append_file_tag(path, file_tag):
+    tag = normalize_file_tag(file_tag)
+    if tag is None:
+        return path
+    root, ext = os.path.splitext(path)
+    return f"{root}_{tag}{ext}"
+
+
+def find_result_files(folder, prefix, file_tag=None):
+    normalized_tag = normalize_file_tag(file_tag)
     files = []
     for filename in sorted(os.listdir(folder)):
-        if filename.startswith(prefix) and filename.endswith('.csv'):
-            files.append(os.path.join(folder, filename))
+        if not filename.startswith(prefix) or not filename.endswith('.csv'):
+            continue
+        if normalized_tag is not None and not filename.endswith(f"_{normalized_tag}.csv"):
+            continue
+        files.append(os.path.join(folder, filename))
     return files
 
 
@@ -81,6 +113,8 @@ if __name__ == '__main__':
     parser.add_argument('--output-folder', type=str, default='results')
     parser.add_argument('--disease', type=str, default='all',
                         help='Disease selector: all, IHD, IS, PAD, full disease name, or comma-separated list')
+    parser.add_argument('--file-tag', type=str, default=None,
+                        help='Optional file suffix tag, e.g. ALL, IHD, IS, PAD')
     parser.add_argument('--scenario', type=str, default=None, help='Optional scenario filter (e.g., val)')
     parser.add_argument('--discount', type=float, default=None, help='Optional discount filter (e.g., 0.02)')
     parser.add_argument('--informal', type=float, default=None, help='Optional informal rate filter (e.g., 0)')
@@ -91,9 +125,11 @@ if __name__ == '__main__':
 
     output_folder = args.output_folder
     os.makedirs(output_folder, exist_ok=True)
+    output_aggregate = append_file_tag('aggregate_results.csv', args.file_tag)
+    output_annual = append_file_tag('annual_results.csv', args.file_tag)
 
     print('aggregate data processing')
-    aggregate_files = find_result_files(folder, 'aggregate_results_TC')
+    aggregate_files = find_result_files(folder, 'aggregate_results_TC', file_tag=args.file_tag)
     if len(aggregate_files) > 0:
         df_aggregate_results = combine_csv(aggregate_files)
         df_aggregate_results = filter_by_disease(df_aggregate_results, args.disease)
@@ -103,14 +139,14 @@ if __name__ == '__main__':
             discount=args.discount,
             informal=args.informal,
         )
-        df_aggregate_results.to_csv(os.path.join(output_folder, 'aggregate_results.csv'), index=False)
-        df_aggregate_results.to_csv(os.path.join(folder, 'aggregate_results.csv'), index=False)
+        df_aggregate_results.to_csv(os.path.join(output_folder, output_aggregate), index=False)
+        df_aggregate_results.to_csv(os.path.join(folder, output_aggregate), index=False)
         print(f'combined {len(aggregate_files)} aggregate files')
     else:
         print('no aggregate result files found')
 
     print('annual data processing')
-    annual_files = find_result_files(folder, 'annual_results_TC')
+    annual_files = find_result_files(folder, 'annual_results_TC', file_tag=args.file_tag)
     if len(annual_files) > 0:
         df_annual_results = combine_csv(annual_files)
         df_annual_results = filter_by_disease(df_annual_results, args.disease)
@@ -120,8 +156,8 @@ if __name__ == '__main__':
             discount=args.discount,
             informal=args.informal,
         )
-        df_annual_results.to_csv(os.path.join(output_folder, 'annual_results.csv'), index=False)
-        df_annual_results.to_csv(os.path.join(folder, 'annual_results.csv'), index=False)
+        df_annual_results.to_csv(os.path.join(output_folder, output_annual), index=False)
+        df_annual_results.to_csv(os.path.join(folder, output_annual), index=False)
         print(f'combined {len(annual_files)} annual files')
     else:
         print('no annual result files found')

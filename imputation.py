@@ -40,6 +40,34 @@ coefficient_file = 'tmpresults/models_coefficient.txt'
 # In[ ]:
 
 
+def normalize_file_tag(file_tag):
+    if file_tag is None:
+        return None
+    tag = str(file_tag).strip()
+    if tag == '':
+        return None
+    if tag.lower() == 'all':
+        return 'ALL'
+    safe = []
+    for ch in tag:
+        if ch.isalnum() or ch in ['_', '-']:
+            safe.append(ch.upper())
+        elif ch in [',', ' ', '/']:
+            safe.append('_')
+    safe_tag = ''.join(safe).strip('_')
+    while '__' in safe_tag:
+        safe_tag = safe_tag.replace('__', '_')
+    return safe_tag if safe_tag != '' else None
+
+
+def append_file_tag(path, file_tag):
+    tag = normalize_file_tag(file_tag)
+    if tag is None:
+        return path
+    root, ext = os.path.splitext(path)
+    return f"{root}_{tag}{ext}"
+
+
 def read_csv_safe(path, **kwargs):
     try:
         return pd.read_csv(path, **kwargs)
@@ -485,7 +513,18 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--popfile', type=str, default='tmpresults/POP_TOTAL.csv') # or 0.02, 0.03
     parser.add_argument('--disease', type=str, default='all',
                         help='Disease selector: all, IHD, IS, PAD, full disease name, or comma-separated list')
+    parser.add_argument('--tc', type=int, default=None, help='Optional ConsiderTC filter/value for imputation')
+    parser.add_argument('--mb', type=int, default=None, help='Optional ConsiderMB filter/value for imputation')
+    parser.add_argument('--scenario', type=str, default=None, help='Optional scenario filter/value for imputation')
+    parser.add_argument('--informal', type=float, default=None, help='Optional informal filter/value for imputation')
+    parser.add_argument('--discount', type=float, default=None, help='Optional discount filter/value for imputation')
+    parser.add_argument('--output-tag', type=str, default=None,
+                        help='Optional output file suffix tag, e.g. ALL, IHD, IS, PAD')
     args = parser.parse_args()
+    output_tag = normalize_file_tag(args.output_tag)
+    if output_tag is not None:
+        summaryfile = append_file_tag(summaryfile, output_tag)
+        coefficient_file = append_file_tag(coefficient_file, output_tag)
     ## ## MAIN FUNCTION - input
     
 
@@ -525,12 +564,17 @@ if __name__ == "__main__":
     import warnings
     warnings.filterwarnings("ignore")
     print('imputing.........')
+    tc_values = [int(args.tc)] if args.tc is not None else [1, 0]
+    mb_values = [int(args.mb)] if args.mb is not None else [1]
+    scenario_values = [str(args.scenario)] if args.scenario is not None else ['val', 'lower', 'upper']
+    informal_values = [float(args.informal)] if args.informal is not None else [0, 0.05, 0.11, 0.23]
+    discount_values = [float(args.discount)] if args.discount is not None else [0, 0.02, 0.03]
     est_pieces = []
-    for ConsiderTC in [1, 0]:
-        for ConsiderMB in [1]:
-            for scenario in ['val', 'lower', 'upper']:
-                for informal in [0, 0.05, 0.11, 0.23]:
-                    for discount in [0, 0.02, 0.03]:
+    for ConsiderTC in tc_values:
+        for ConsiderMB in mb_values:
+            for scenario in scenario_values:
+                for informal in informal_values:
+                    for discount in discount_values:
                         gdp_base = os.path.splitext(args.gdpfile)[0]
                         gdp_file_name = gdp_base + '_discount%s.csv' % (discount)
                         GDP_filled = read_csv_safe(gdp_file_name).set_index('Country Code')
@@ -544,7 +588,8 @@ if __name__ == "__main__":
     else:
         df = pd.DataFrame(columns=['Country Code', 'pc_loss', 'GDPloss', 'tax', 'disease',
                                    'scenario', 'ConsiderTC', 'ConsiderMB', 'informal', 'discount'])
-    df.to_csv('tmpresults/est.csv', index=False)
+    est_output_path = append_file_tag('tmpresults/est.csv', output_tag)
+    df.to_csv(est_output_path, index=False)
 
 
     # In[ ]:
@@ -558,4 +603,3 @@ if __name__ == "__main__":
     print('imputed data:', len(df_imputed))
 
     # In[ ]:
-

@@ -682,6 +682,34 @@ def get_available_countries(scen='val', disease_group=None):
     return sorted(df['Country Code'].dropna().unique())
 
 
+def normalize_file_tag(file_tag):
+    if file_tag is None:
+        return None
+    tag = str(file_tag).strip()
+    if tag == '':
+        return None
+    if tag.lower() == 'all':
+        return 'ALL'
+    safe = []
+    for ch in tag:
+        if ch.isalnum() or ch in ['_', '-']:
+            safe.append(ch.upper())
+        elif ch in [',', ' ', '/']:
+            safe.append('_')
+    safe_tag = ''.join(safe).strip('_')
+    while '__' in safe_tag:
+        safe_tag = safe_tag.replace('__', '_')
+    return safe_tag if safe_tag != '' else None
+
+
+def append_file_tag(path, file_tag):
+    tag = normalize_file_tag(file_tag)
+    if tag is None:
+        return path
+    root, ext = os.path.splitext(path)
+    return f"{root}_{tag}{ext}"
+
+
 # In[18]:
 
 
@@ -710,6 +738,8 @@ if __name__ == "__main__":
     parser.add_argument('-i', '--informal', type=float, default=0) # range 0-1
     parser.add_argument('--disease', type=str, default='all',
                         help='Disease selector: IHD, IS, PAD, exact disease name, all, or comma-separated list')
+    parser.add_argument('--file-tag', type=str, default=None,
+                        help='Optional output file suffix tag, e.g. ALL, IHD, IS, PAD')
     parser.add_argument('--list-diseases', action='store_true',
                         help='List selectable diseases and exit')
     parser.add_argument('-r', '--ran', type=bool, default=False)
@@ -806,6 +836,8 @@ if __name__ == "__main__":
     if args.ran:
         save_annfilename = 'tmpresults/runexampleann.csv'
         save_aggfilename = 'tmpresults/runexampleagg.csv'
+    save_annfilename = append_file_tag(save_annfilename, args.file_tag)
+    save_aggfilename = append_file_tag(save_aggfilename, args.file_tag)
 
     if len(pieces_df) > 0:
         df = pd.concat(pieces_df).reset_index()
