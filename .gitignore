@@ -1,14 +1,17 @@
-## large data files
 bigdata/*
 
-## temp results
 *.tmp
 
-## system files or cache files
 .DS*
 .ipynb*
 *ingore*/
 
+*.pyc
+logs/*
+prev/*
+results/*
+tables/*
+tmpresults/*
+~$*
 
-
-
+.vscode/settings.json
