@@ -138,7 +138,7 @@ class Tables():
         
 
     def set_params(self):
-        countries_info = read_csv_safe('data/dl1_countrycodeorg_country_name.csv', encoding='ISO-8859-1')
+        countries_info = read_csv_safe('data/countrycode.csv', encoding='utf-8-sig')
         self.countries_info = countries_info[['Country Code', 'Region', 'Income group', 'WBCountry', 'country']]
         # self.codemap = countries_info.dropna()
         self.endyear = 2051

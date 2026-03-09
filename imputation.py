@@ -337,7 +337,7 @@ def get_IHME_data(df_IHME, disease, scenario):
     return x_input
 
 def get_Indicator_data():
-    countries_info = pd.read_csv('data/dl1_countrycodeorg_country_name.csv', encoding='ISO-8859-1')
+    countries_info = pd.read_csv('data/countrycode.csv', encoding='utf-8-sig')
     Income = countries_info[['Country Code', 'Income group']]
     # print(Income['Income group'].unique())
     col1 = Income['Country Code']
@@ -536,7 +536,7 @@ if __name__ == "__main__":
     diseases = sorted(df_result['disease'].unique())
     legacy_ihme_path = "bigdata/data_diabetes/IHME.csv"
     if os.path.exists(legacy_ihme_path):
-        countries_info = read_csv_safe('data/dl1_countrycodeorg_country_name.csv', encoding='ISO-8859-1')
+        countries_info = read_csv_safe('data/countrycode.csv', encoding='utf-8-sig')
         code_map = dict(zip(countries_info.country, countries_info['Country Code']))
         df_IHME = read_csv_safe(legacy_ihme_path)
 
