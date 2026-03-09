@@ -10,8 +10,9 @@ bigdata/*
 logs/*
 prev/*
 results/*
+figures/*
 tables/*
 tmpresults/*
 ~$*
 
-.vscode/settings.json
+.vscode/*
