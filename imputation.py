@@ -596,10 +596,22 @@ if __name__ == "__main__":
     df_imputed = pd.concat([df_result, df])
     df_imputed = df_imputed.drop_duplicates(subset=['ConsiderTC','ConsiderMB','informal','discount','scenario','disease','Country Code'], keep='last')
     df_imputed.sort_values(['ConsiderTC', 'ConsiderMB','informal','discount','scenario','disease','Country Code'], inplace=True)
-    df_imputed.to_csv(args.output, index=False)
 
-    # In[ ]:
     print('primary data:', len(df_result))
-    print('imputed data:', len(df_imputed))
+    print('imputed (per-disease) data:', len(df_imputed))
+
+    if len(diseases) > 1:
+        group_keys = ['Country Code', 'scenario', 'ConsiderTC', 'ConsiderMB', 'informal', 'discount']
+        df_agg = df_imputed.groupby(group_keys, as_index=False).agg(
+            GDPloss=('GDPloss', 'sum'),
+            tax=('tax', 'sum'),
+            pc_loss=('pc_loss', 'sum'),
+        )
+        df_agg['disease'] = 'ASCVD'
+        df_agg.sort_values(group_keys, inplace=True)
+        df_imputed = df_agg
+        print('aggregated to ASCVD:', len(df_imputed))
+
+    df_imputed.to_csv(args.output, index=False)
 
     # In[ ]:

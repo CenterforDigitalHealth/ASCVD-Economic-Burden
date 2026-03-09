@@ -38,7 +38,7 @@ REQUIRED_COUNTRY_DATASETS = [
 ]
 ASCVD_METRIC_CACHE = {}
 HE_GROWTH_CACHE = None
-TC_TABLE_CACHE = None
+TC_TABLE_CACHE = {}  # keyed by disease_group
 SUPPORTED_COUNTRIES_CACHE = None
 
 
@@ -615,14 +615,11 @@ def get_he(country, year, projectStartYear):
 # get TC
 def get_TC(country, disease, disease_group):
     global TC_TABLE_CACHE
-    # Toggle between IDF (TC_ppp.csv) and Dieleman (TC_dieleman.csv)
-    # USE_DIELEMAN_DATA = True 
-    filename = f'data/TC_{disease_group}.csv' # Switch to GBD data
-    # filename = 'data/TC_ppp.csv' # Original IDF data
+    filename = f'data/TC_{disease_group}.csv'
 
-    if TC_TABLE_CACHE is None:
-        TC_TABLE_CACHE = read_csv_safe(filename).set_index('ISO3')
-    df_tc = TC_TABLE_CACHE
+    if disease_group not in TC_TABLE_CACHE:
+        TC_TABLE_CACHE[disease_group] = read_csv_safe(filename).set_index('ISO3')
+    df_tc = TC_TABLE_CACHE[disease_group]
     if country not in df_tc.index:
         return 0
     if disease not in df_tc.columns:
