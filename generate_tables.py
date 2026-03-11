@@ -8,6 +8,20 @@ import pdb
 
 ASCVD_GROUPS = ['IHD', 'IS', 'PAD']
 TABLE_YEARS = ['2020', '2050']
+LOCATION_ORDER = [
+    'East Asia and Pacific',
+    'Europe and Central Asia',
+    'Latin America and Caribbean',
+    'Middle East and North Africa',
+    'North America',
+    'South Asia',
+    'Sub-Saharan Africa',
+    'Low income',
+    'Lower middle income',
+    'Upper middle income',
+    'High income',
+    'Global',
+]
 DISEASE_ALIASES = {
     'IHD': 'Ischemic heart disease',
     'IS': 'Ischemic stroke',
@@ -98,12 +112,58 @@ def normalize_output_tag(output_tag, disease='all'):
     return '_'.join(dedup)
 
 
+def parse_ascvd_groups(disease_arg):
+    if disease_arg is None:
+        return list(ASCVD_GROUPS)
+
+    text = str(disease_arg).strip()
+    if text == '':
+        return list(ASCVD_GROUPS)
+
+    groups = []
+    for token in text.split(','):
+        token = token.strip()
+        if token == '':
+            continue
+
+        upper_token = token.upper()
+        lower_token = token.lower()
+
+        if lower_token in ['all', 'ascvd']:
+            return list(ASCVD_GROUPS)
+
+        if upper_token in ASCVD_GROUPS:
+            mapped = upper_token
+        elif lower_token in DISEASE_NAME_TO_ALIAS:
+            mapped = DISEASE_NAME_TO_ALIAS[lower_token]
+        else:
+            mapped = None
+
+        if mapped is not None and mapped not in groups:
+            groups.append(mapped)
+
+    if len(groups) == 0:
+        return list(ASCVD_GROUPS)
+    return groups
+
+
 def format_value(value, digits):
     if pd.isna(value):
         return ''
     rounded = round(float(value), digits)
+    if digits > 0:
+        text = f"{rounded:,.{digits}f}"
+        if abs(rounded) < 10000:
+            text = text.replace(',', '')
+        if text in ['-0', '-0.0', '-0.00']:
+            return f"{0:.{digits}f}"
+        return text
+
+    integer = int(rounded)
+    if abs(integer) >= 10000:
+        return f"{integer:,}"
     if digits == 0:
-        return str(int(rounded))
+        return str(integer)
     return str(rounded)
 
 
@@ -113,9 +173,64 @@ def format_interval(mean_value, lower_value, upper_value, digits=0, scale=1.0):
     mean_text = format_value(scale * mean_value, digits)
     if pd.isna(lower_value) or pd.isna(upper_value):
         return mean_text
-    lower_text = format_value(scale * lower_value, digits)
-    upper_text = format_value(scale * upper_value, digits)
+    lower_bound = min(lower_value, upper_value)
+    upper_bound = max(lower_value, upper_value)
+    lower_text = format_value(scale * lower_bound, digits)
+    upper_text = format_value(scale * upper_bound, digits)
     return f"{mean_text}({lower_text}-{upper_text})"
+
+
+def format_value_with_ratio_interval(
+    value,
+    lower_value,
+    upper_value,
+    ratio,
+    lower_ratio,
+    upper_ratio,
+    value_digits=0,
+    value_scale=1.0,
+    ratio_digits=1,
+    ratio_scale=100.0,
+    show_ratio_interval=True,
+):
+    value_text = format_interval(value, lower_value, upper_value, digits=value_digits, scale=value_scale)
+    if value_text == '':
+        return ''
+    if pd.isna(ratio):
+        return value_text
+    if show_ratio_interval:
+        ratio_text = format_interval(ratio, lower_ratio, upper_ratio, digits=ratio_digits, scale=ratio_scale)
+    else:
+        ratio_text = format_value(ratio_scale * ratio, ratio_digits)
+    if ratio_text == '':
+        return value_text
+    return f"{value_text} ({ratio_text}%)"
+
+
+def apply_location_order(data, location_col='location', secondary_sort_cols=None, secondary_ascending=None):
+    if location_col not in data.columns:
+        return data
+
+    out = data.copy()
+    out[location_col] = out[location_col].replace({'global': 'Global'})
+
+    dynamic_categories = list(pd.Series(out[location_col].dropna().astype(str).unique()))
+    categories = list(LOCATION_ORDER)
+    for name in dynamic_categories:
+        if name not in categories:
+            categories.append(name)
+
+    out['_location_order'] = pd.Categorical(out[location_col], categories=categories, ordered=True)
+    sort_cols = ['_location_order']
+    ascending = [True]
+    if secondary_sort_cols:
+        sort_cols.extend(secondary_sort_cols)
+        if secondary_ascending is None:
+            ascending.extend([True] * len(secondary_sort_cols))
+        else:
+            ascending.extend(list(secondary_ascending))
+    out = out.sort_values(sort_cols, ascending=ascending).drop(columns=['_location_order'])
+    return out
 
 
 class Tables():
@@ -131,6 +246,7 @@ class Tables():
         self.default_discount = discount
         self.default_informal = informal
         self.output_tag = normalize_output_tag(output_tag, disease=disease)
+        self.ascvd_groups = parse_ascvd_groups(disease)
         os.makedirs('tables', exist_ok=True)
         self.set_state()
         self.set_params()
@@ -198,7 +314,7 @@ class Tables():
             years = TABLE_YEARS
 
         combined = None
-        for group in ASCVD_GROUPS:
+        for group in self.ascvd_groups:
             path = os.path.join('data', 'ASCVD', group, f'{metric_prefix}_{scenario}.csv')
             if not os.path.exists(path):
                 continue
@@ -247,6 +363,132 @@ class Tables():
         country = counts.groupby('Country Code').sum().reset_index()
         return country
 
+    def _get_group_data_by_scenario(self, identify):
+        scenario_groups = {}
+        original_state = dict(self.state)
+        for scenario in ['lower', 'upper', 'val']:
+            self.set_state(state={'ConsiderTC': 1, 'ConsiderMB': 1, 'scenario': scenario})
+            self.get_data()
+            scenario_groups[scenario] = self.get_group_data(identify)
+        self.set_state(state=original_state)
+        self.get_data()
+        return scenario_groups
+
+    def _merge_interval_columns(self, base_df, lower_df, upper_df, keys, value_cols):
+        data = base_df.copy()
+        if len(data) == 0:
+            for key in keys:
+                if key not in data.columns:
+                    data[key] = pd.Series(dtype='object')
+            for col in value_cols:
+                if col not in data.columns:
+                    data[col] = pd.Series(dtype='float64')
+            for col in value_cols:
+                data[f'{col}_lower'] = pd.Series(dtype='float64')
+                data[f'{col}_upper'] = pd.Series(dtype='float64')
+            ordered_cols = keys + value_cols + [f'{col}_lower' for col in value_cols] + [f'{col}_upper' for col in value_cols]
+            return data[ordered_cols]
+
+        for col in value_cols:
+            if col not in data.columns:
+                data[col] = np.nan
+
+        lower_available = [col for col in value_cols if col in lower_df.columns]
+        if len(lower_df) > 0 and len(lower_available) > 0:
+            lower = lower_df[keys + lower_available].rename(columns={col: f'{col}_lower' for col in lower_available})
+            data = data.merge(lower, on=keys, how='left')
+        for col in value_cols:
+            if f'{col}_lower' not in data.columns:
+                data[f'{col}_lower'] = np.nan
+
+        upper_available = [col for col in value_cols if col in upper_df.columns]
+        if len(upper_df) > 0 and len(upper_available) > 0:
+            upper = upper_df[keys + upper_available].rename(columns={col: f'{col}_upper' for col in upper_available})
+            data = data.merge(upper, on=keys, how='left')
+        for col in value_cols:
+            if f'{col}_upper' not in data.columns:
+                data[f'{col}_upper'] = np.nan
+
+        ordered_cols = keys + value_cols + [f'{col}_lower' for col in value_cols] + [f'{col}_upper' for col in value_cols]
+        return data[ordered_cols]
+
+    def _select_base_scenario_df(self, scenario_map):
+        base = scenario_map.get('val', pd.DataFrame())
+        if len(base) == 0:
+            base = scenario_map.get('lower', pd.DataFrame())
+        if len(base) == 0:
+            base = scenario_map.get('upper', pd.DataFrame())
+        return base
+
+    def _build_daly_country(self, pop_df, scenario='val', years=None):
+        if years is None:
+            years = TABLE_YEARS
+        daly_rate = self._load_ascvd_rate_sum('DALYs', scenario=scenario, years=years)
+        if len(daly_rate) > 0:
+            daly = self._rate_to_country_total(daly_rate, pop_df, years=years)
+        else:
+            # Fallback for compatibility when DALYs files are unavailable.
+            yll_rate = self._load_ascvd_rate_sum('YLLs', scenario=scenario, years=years)
+            yld_rate = self._load_ascvd_rate_sum('YLDs', scenario=scenario, years=years)
+            if len(yll_rate) == 0 and len(yld_rate) == 0:
+                daly = pd.DataFrame(columns=['Country Code'] + years)
+            elif len(yll_rate) == 0:
+                daly = self._rate_to_country_total(yld_rate, pop_df, years=years)
+            elif len(yld_rate) == 0:
+                daly = self._rate_to_country_total(yll_rate, pop_df, years=years)
+            else:
+                daly = self._rate_to_country_total(yll_rate.add(yld_rate, fill_value=0), pop_df, years=years)
+        if len(daly) == 0:
+            return pd.DataFrame(columns=['Country Code', 'Region', 'Income group'] + years)
+        return daly.merge(self.INFODATA[['Country Code', 'Region', 'Income group']], on='Country Code', how='inner')
+
+    def _build_prev_country(self, pop_df, scenario='val', years=None):
+        if years is None:
+            years = TABLE_YEARS
+        prev_rate = self._load_ascvd_rate_sum('Prevalence', scenario=scenario, years=years)
+        prev = self._rate_to_country_total(prev_rate, pop_df, years=years)
+        if len(prev) == 0:
+            return pd.DataFrame(columns=['Country Code', 'Region', 'Income group'] + years)
+        return prev.merge(self.INFODATA[['Country Code', 'Region', 'Income group']], on='Country Code', how='inner')
+
+    def _summarize_metric_by_location(self, country_df, metric_prefix, years=None, divisor=1000000.0):
+        if years is None:
+            years = TABLE_YEARS
+        value_cols = [f'{metric_prefix}{year}' for year in years]
+        ratio_cols = [f'{metric_prefix}{year}_Ratio' for year in years]
+        out_cols = ['location'] + value_cols + ratio_cols
+
+        if len(country_df) == 0:
+            return pd.DataFrame(columns=out_cols)
+
+        def summarize_one(group_col):
+            if group_col is None:
+                part = country_df[years].sum(numeric_only=True).to_frame().T
+                part['location'] = 'Global'
+            else:
+                part = country_df.groupby(group_col)[years].sum().reset_index()
+                part['location'] = part[group_col]
+
+            for year in years:
+                value_col = f'{metric_prefix}{year}'
+                ratio_col = f'{metric_prefix}{year}_Ratio'
+                part[value_col] = part[year] / divisor
+                total = part[value_col].sum()
+                if total == 0:
+                    part[ratio_col] = 0
+                else:
+                    part[ratio_col] = part[value_col] / total
+            return part[out_cols]
+
+        return pd.concat(
+            [
+                summarize_one('Region'),
+                summarize_one('Income group'),
+                summarize_one(None),
+            ],
+            ignore_index=True,
+        )
+
     def generate_table1(self):
         table1_path = f"tables/Table1_{self.output_tag}.csv"
         identify = ['Country Code', 'disease']
@@ -290,7 +532,7 @@ class Tables():
                 row['GDPloss'],
                 row.get('GDPloss_lower', np.nan),
                 row.get('GDPloss_upper', np.nan),
-                digits=0,
+                digits=1,
                 scale=1000.0,
             ),
             axis=1,
@@ -310,7 +552,7 @@ class Tables():
                 row['pc_loss'],
                 row.get('pc_loss_lower', np.nan),
                 row.get('pc_loss_upper', np.nan),
-                digits=0,
+                digits=1,
                 scale=1.0,
             ),
             axis=1,
@@ -319,135 +561,282 @@ class Tables():
         data.to_csv(table1_path, index=False)
 
     def generate_table2(self):
-        identify =['Region', 'disease']
-        group1 = self.get_group_data(identify)
-        data1 = group1.groupby('Region').head(5).reset_index()
-        data1['location'] = data1['Region']
-        data1.sort_values(['Region','GDPlossRatio'], ascending = [True,False], inplace=True)
+        table2_path = f"tables/Table2_{self.output_tag}.csv"
+        value_cols = ['GDPloss', 'GDPlossRatio', 'tax', 'pc_loss']
 
+        region_groups = self._get_group_data_by_scenario(['Region', 'disease'])
+        region_base = self._select_base_scenario_df(region_groups)
+        if len(region_base) > 0:
+            region_base = region_base.sort_values(['Region', 'GDPlossRatio'], ascending=[True, False]).groupby('Region').head(5).copy()
+            region_data = self._merge_interval_columns(
+                region_base,
+                region_groups['lower'],
+                region_groups['upper'],
+                ['Region', 'disease'],
+                value_cols,
+            )
+            region_data['location'] = region_data['Region']
+        else:
+            region_data = pd.DataFrame(columns=['location', 'disease'] + value_cols + [f'{col}_lower' for col in value_cols] + [f'{col}_upper' for col in value_cols])
 
-        identify =['Income group', 'disease']
-        group2 = self.get_group_data(identify)
-        data2 = group2.groupby('Income group').head(5).reset_index()
-        data2['location'] = data2['Income group']
-        data2.sort_values(['Income group','GDPlossRatio'], ascending = [True,False], inplace=True)
+        income_groups = self._get_group_data_by_scenario(['Income group', 'disease'])
+        income_base = self._select_base_scenario_df(income_groups)
+        if len(income_base) > 0:
+            income_base = income_base.sort_values(['Income group', 'GDPlossRatio'], ascending=[True, False]).groupby('Income group').head(5).copy()
+            income_data = self._merge_interval_columns(
+                income_base,
+                income_groups['lower'],
+                income_groups['upper'],
+                ['Income group', 'disease'],
+                value_cols,
+            )
+            income_data['location'] = income_data['Income group']
+        else:
+            income_data = pd.DataFrame(columns=['location', 'disease'] + value_cols + [f'{col}_lower' for col in value_cols] + [f'{col}_upper' for col in value_cols])
 
-        identify =['disease']
-        group3 = self.get_group_data(identify)
-        data4 = group3.head(5).reset_index()
-        data4['location'] = 'global'
+        global_groups = self._get_group_data_by_scenario(['disease'])
+        global_base = self._select_base_scenario_df(global_groups)
+        if len(global_base) > 0:
+            global_base = global_base.sort_values('GDPlossRatio', ascending=False).head(5).copy()
+            global_data = self._merge_interval_columns(
+                global_base,
+                global_groups['lower'],
+                global_groups['upper'],
+                ['disease'],
+                value_cols,
+            )
+            global_data['location'] = 'Global'
+        else:
+            global_data = pd.DataFrame(columns=['location', 'disease'] + value_cols + [f'{col}_lower' for col in value_cols] + [f'{col}_upper' for col in value_cols])
 
-        data = pd.concat([data1, data2, data4])   
-        data['burden'] = data.apply(lambda row: str(round(row['GDPloss']))+' ('+   "{0:.1%}".format(row['GDPlossRatio'])   +')', axis=1)
-        data['tax %'] = data.apply(lambda row: str(round(row['tax'],2)), axis=1)
-        data['pc_loss'] = data.apply(lambda row: str(round(row['pc_loss'])), axis=1) 
-        data[['location','disease','burden','tax %', 'pc_loss']].to_csv('tables/Table2_informal%s_discount%s.csv'%(self.state['informal'], self.state['discount']), index=False) 
+        data = pd.concat([region_data, income_data, global_data], ignore_index=True, sort=False)
+        if len(data) == 0:
+            pd.DataFrame(columns=['location', 'disease', 'burden', 'pc_loss', 'tax']).to_csv(table2_path, index=False)
+            return
+
+        data['burden'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['GDPloss'],
+                row.get('GDPloss_lower', np.nan),
+                row.get('GDPloss_upper', np.nan),
+                row['GDPlossRatio'],
+                row.get('GDPlossRatio_lower', np.nan),
+                row.get('GDPlossRatio_upper', np.nan),
+                value_digits=1,
+                value_scale=1.0,
+                ratio_digits=1,
+                ratio_scale=100.0,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['tax'] = data.apply(
+            lambda row: format_interval(
+                row['tax'],
+                row.get('tax_lower', np.nan),
+                row.get('tax_upper', np.nan),
+                digits=2,
+                scale=1.0,
+            ),
+            axis=1,
+        )
+        data['pc_loss'] = data.apply(
+            lambda row: format_interval(
+                row['pc_loss'],
+                row.get('pc_loss_lower', np.nan),
+                row.get('pc_loss_upper', np.nan),
+                digits=1,
+                scale=1.0,
+            ),
+            axis=1,
+        )
+        data = apply_location_order(
+            data,
+            secondary_sort_cols=['GDPlossRatio', 'disease'],
+            secondary_ascending=[False, True],
+        )
+        data[['location', 'disease', 'burden', 'pc_loss', 'tax']].to_csv(table2_path, index=False)
 
     def generate_table3(self):
-        data1 = self.INFODATA.groupby('Region').sum().reset_index()
+        table3_path = f"tables/Table3_{self.output_tag}.csv"
+        data1 = self.INFODATA.groupby('Region').sum(numeric_only=True).reset_index()
         data1['location'] = data1['Region']
-        data1['gdp_psy_Ratio'] = data1['gdp_psy']/data1['gdp_psy'].sum()   
-        data1['pop_psy_Ratio'] = data1['pop_psy']/data1['pop_psy'].sum()  
+        data1['gdp_psy_Ratio'] = data1['gdp_psy']/data1['gdp_psy'].sum()
+        data1['pop_psy_Ratio'] = data1['pop_psy']/data1['pop_psy'].sum()
         data1['gdp_psy'] = data1['gdp_psy'] / 1000000000
         data1['pop_psy'] = data1['pop_psy'] / 1000000
-        data1['totalGDP_Ratio'] = data1['totalGDP']/data1['totalGDP'].sum()   
-        data1['totalPOP_Ratio'] = data1['totalPOP']/data1['totalPOP'].sum()  
+        data1['totalGDP_Ratio'] = data1['totalGDP']/data1['totalGDP'].sum()
+        data1['totalPOP_Ratio'] = data1['totalPOP']/data1['totalPOP'].sum()
         data1['averageGDP'] = data1['totalGDP'] / 1000000000 / (self.endyear - self.projectStartYear)
         data1['averagePOP'] = data1['totalPOP'] / 1000000 / (self.endyear - self.projectStartYear)
-        data2 = self.INFODATA.groupby('Income group').sum().reset_index()
+        data2 = self.INFODATA.groupby('Income group').sum(numeric_only=True).reset_index()
         data2['location'] = data2['Income group']
-        data2['gdp_psy_Ratio'] = data2['gdp_psy']/data2['gdp_psy'].sum()   
-        data2['pop_psy_Ratio'] = data2['pop_psy']/data2['pop_psy'].sum()   
+        data2['gdp_psy_Ratio'] = data2['gdp_psy']/data2['gdp_psy'].sum()
+        data2['pop_psy_Ratio'] = data2['pop_psy']/data2['pop_psy'].sum()
         data2['gdp_psy'] = data2['gdp_psy'] / 1000000000
         data2['pop_psy'] = data2['pop_psy'] / 1000000
-        data2['totalGDP_Ratio'] = data2['totalGDP']/data2['totalGDP'].sum()   
-        data2['totalPOP_Ratio'] = data2['totalPOP']/data2['totalPOP'].sum()  
+        data2['totalGDP_Ratio'] = data2['totalGDP']/data2['totalGDP'].sum()
+        data2['totalPOP_Ratio'] = data2['totalPOP']/data2['totalPOP'].sum()
         data2['averageGDP'] = data2['totalGDP'] / 1000000000 / (self.endyear - self.projectStartYear)
         data2['averagePOP'] = data2['totalPOP'] / 1000000 / (self.endyear - self.projectStartYear)
-        # print(self.INFODATA.columns)
-        # pdb.set_trace()
         data3 = self.INFODATA.sum(numeric_only=True).to_frame().T
-        # print(data3.columns)
-        data3['location'] = 'global'
-        data3['gdp_psy_Ratio'] = data3['gdp_psy']/data3['gdp_psy'].sum()   
-        data3['pop_psy_Ratio'] = data3['pop_psy']/data3['pop_psy'].sum()   
+        data3['location'] = 'Global'
+        data3['gdp_psy_Ratio'] = data3['gdp_psy']/data3['gdp_psy'].sum()
+        data3['pop_psy_Ratio'] = data3['pop_psy']/data3['pop_psy'].sum()
         data3['gdp_psy'] = data3['gdp_psy'] / 1000000000
         data3['pop_psy'] = data3['pop_psy'] / 1000000
-        data3['totalGDP_Ratio'] = data3['totalGDP']/data3['totalGDP'].sum()   
-        data3['totalPOP_Ratio'] = data3['totalPOP']/data3['totalPOP'].sum()  
+        data3['totalGDP_Ratio'] = data3['totalGDP']/data3['totalGDP'].sum()
+        data3['totalPOP_Ratio'] = data3['totalPOP']/data3['totalPOP'].sum()
         data3['averageGDP'] = data3['totalGDP'] / 1000000000 / (self.endyear - self.projectStartYear)
-        data3['averagePOP'] = data3['totalPOP'] / 1000000 / (self.endyear - self.projectStartYear)        
+        data3['averagePOP'] = data3['totalPOP'] / 1000000 / (self.endyear - self.projectStartYear)
 
         pop = read_csv_safe('./data/population_un.csv').set_index(['Country Code', 'sex', 'age'])
         pop = pop[TABLE_YEARS].apply(pd.to_numeric, errors='coerce').fillna(0)
 
-        yll_rate = self._load_ascvd_rate_sum('YLLs', scenario='val', years=TABLE_YEARS)
-        yld_rate = self._load_ascvd_rate_sum('YLDs', scenario='val', years=TABLE_YEARS)
-        if len(yll_rate) == 0 and len(yld_rate) == 0:
-            DALY = pd.DataFrame(columns=['Country Code'] + TABLE_YEARS)
-        elif len(yll_rate) == 0:
-            DALY = self._rate_to_country_total(yld_rate, pop, years=TABLE_YEARS)
-        elif len(yld_rate) == 0:
-            DALY = self._rate_to_country_total(yll_rate, pop, years=TABLE_YEARS)
-        else:
-            DALY = self._rate_to_country_total(yll_rate.add(yld_rate, fill_value=0), pop, years=TABLE_YEARS)
-        DALY = DALY.merge(self.INFODATA[['Country Code', 'Region', 'Income group']], on='Country Code')
-        data4 = DALY.groupby('Region').sum().reset_index()
-        data4['location'] = data4['Region']
-        data4['daly2020'] = data4['2020'] / 1000000
-        data4['daly2020_Ratio'] = data4['daly2020'] / data4['daly2020'].sum()
-        data4['daly2050'] = data4['2050'] / 1000000
-        data4['daly2050_Ratio'] = data4['daly2050'] / data4['daly2050'].sum()
-        data5 = DALY.groupby('Income group').sum().reset_index()
-        data5['location'] = data5['Income group']
-        data5['daly2020'] = data5['2020'] / 1000000
-        data5['daly2020_Ratio'] = data5['daly2020'] / data5['daly2020'].sum()
-        data5['daly2050'] = data5['2050'] / 1000000
-        data5['daly2050_Ratio'] = data5['daly2050'] / data5['daly2050'].sum()
-        # pdb.set_trace()
-        data6 = DALY.sum(numeric_only=True).to_frame().T
-        data6['location'] = 'global'
-        data6['daly2020'] = data6['2020'] / 1000000
-        data6['daly2020_Ratio'] = data6['daly2020'] / data6['daly2020'].sum()
-        data6['daly2050'] = data6['2050'] / 1000000
-        data6['daly2050_Ratio'] = data6['daly2050'] / data6['daly2050'].sum()
+        daly_by_scenario = {}
+        prev_by_scenario = {}
+        for scenario in ['lower', 'upper', 'val']:
+            daly_country = self._build_daly_country(pop, scenario=scenario, years=TABLE_YEARS)
+            daly_by_scenario[scenario] = self._summarize_metric_by_location(daly_country, metric_prefix='daly', years=TABLE_YEARS)
+            prev_country = self._build_prev_country(pop, scenario=scenario, years=TABLE_YEARS)
+            prev_by_scenario[scenario] = self._summarize_metric_by_location(prev_country, metric_prefix='prev', years=TABLE_YEARS)
 
-        prev_rate = self._load_ascvd_rate_sum('Prevalence', scenario='val', years=TABLE_YEARS)
-        PREV = self._rate_to_country_total(prev_rate, pop, years=TABLE_YEARS)
-        PREV = PREV.merge(self.INFODATA[['Country Code', 'Region', 'Income group']], on='Country Code')
-        data7 = PREV.groupby('Region').sum().reset_index()
-        data7['location'] = data7['Region']
-        data7['prev2020'] = data7['2020'] / 1000000
-        data7['prev2020_Ratio'] = data7['prev2020'] / data7['prev2020'].sum()
-        data7['prev2050'] = data7['2050'] / 1000000
-        data7['prev2050_Ratio'] = data7['prev2050'] / data7['prev2050'].sum()
-        data8 = PREV.groupby('Income group').sum().reset_index()
-        data8['location'] = data8['Income group']
-        data8['prev2020'] = data8['2020'] / 1000000
-        data8['prev2020_Ratio'] = data8['prev2020'] / data8['prev2020'].sum()
-        data8['prev2050'] = data8['2050'] / 1000000
-        data8['prev2050_Ratio'] = data8['prev2050'] / data8['prev2050'].sum()
-        data9 = PREV.sum(numeric_only=True).to_frame().T
-        data9['location'] = 'global'
-        data9['prev2020'] = data9['2020'] / 1000000
-        data9['prev2020_Ratio'] = data9['prev2020'] / data9['prev2020'].sum()
-        data9['prev2050'] = data9['2050'] / 1000000
-        data9['prev2050_Ratio'] = data9['prev2050'] / data9['prev2050'].sum()     
-        
-        data_info = pd.concat([data1, data2, data3])
-        data_daly = pd.concat([data4, data5, data6])
-        data_prev = pd.concat([data7, data8, data9])
-        data = data_info.merge(data_daly, on='location').merge(data_prev, on='location')
+        data_info = pd.concat([data1, data2, data3], ignore_index=True, sort=False)
 
-        data['GDP 2020'] = data.apply(lambda row: str(round(row['gdp_psy']))+' ('+   "{0:.1%}".format(row['gdp_psy_Ratio'])   +')', axis=1)
-        data['POP 2020'] = data.apply(lambda row: str(round(row['pop_psy']))+' ('+   "{0:.1%}".format(row['pop_psy_Ratio'])   +')', axis=1)
-        data['DALY 2020'] = data.apply(lambda row: str(round(row['daly2020']))+' ('+   "{0:.1%}".format(row['daly2020_Ratio'])   +')', axis=1)
-        data['DALY 2050'] = data.apply(lambda row: str(round(row['daly2050']))+' ('+   "{0:.1%}".format(row['daly2050_Ratio'])   +')', axis=1)
-        data['PREV 2020'] = data.apply(lambda row: str(round(row['prev2020']))+' ('+   "{0:.1%}".format(row['prev2020_Ratio'])   +')', axis=1)
-        data['PREV 2050'] = data.apply(lambda row: str(round(row['prev2050']))+' ('+   "{0:.1%}".format(row['prev2050_Ratio'])   +')', axis=1)
-        data['averageGDP'] = data.apply(lambda row: str(round(row['averageGDP']))+' ('+   "{0:.1%}".format(row['totalGDP_Ratio'])   +')', axis=1)
-        data['averagePOP'] = data.apply(lambda row: str(round(row['averagePOP']))+' ('+   "{0:.1%}".format(row['totalPOP_Ratio'])   +')', axis=1)
-        data[['location', 'GDP 2020', 'averageGDP', 'averagePOP', 'POP 2020', 'DALY 2020', 'DALY 2050', 'PREV 2020', 'PREV 2050']].to_csv('tables/Table3_discount%s.csv'%(self.state['discount']), index=False)
+        data_daly_base = self._select_base_scenario_df(daly_by_scenario)
+        data_daly = self._merge_interval_columns(
+            data_daly_base,
+            daly_by_scenario.get('lower', pd.DataFrame()),
+            daly_by_scenario.get('upper', pd.DataFrame()),
+            ['location'],
+            ['daly2020', 'daly2020_Ratio', 'daly2050', 'daly2050_Ratio'],
+        )
+
+        data_prev_base = self._select_base_scenario_df(prev_by_scenario)
+        data_prev = self._merge_interval_columns(
+            data_prev_base,
+            prev_by_scenario.get('lower', pd.DataFrame()),
+            prev_by_scenario.get('upper', pd.DataFrame()),
+            ['location'],
+            ['prev2020', 'prev2020_Ratio', 'prev2050', 'prev2050_Ratio'],
+        )
+
+        data = data_info.merge(data_daly, on='location', how='left').merge(data_prev, on='location', how='left')
+
+        data['GDP 2020'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['gdp_psy'],
+                np.nan,
+                np.nan,
+                row['gdp_psy_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['POP 2020'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['pop_psy'],
+                np.nan,
+                np.nan,
+                row['pop_psy_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['DALY 2020'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['daly2020'],
+                np.nan,
+                np.nan,
+                row['daly2020_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['DALY 2050'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['daly2050'],
+                np.nan,
+                np.nan,
+                row['daly2050_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['PREV 2020'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['prev2020'],
+                np.nan,
+                np.nan,
+                row['prev2020_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['PREV 2050'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['prev2050'],
+                np.nan,
+                np.nan,
+                row['prev2050_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['averageGDP'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['averageGDP'],
+                np.nan,
+                np.nan,
+                row['totalGDP_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data['averagePOP'] = data.apply(
+            lambda row: format_value_with_ratio_interval(
+                row['averagePOP'],
+                np.nan,
+                np.nan,
+                row['totalPOP_Ratio'],
+                np.nan,
+                np.nan,
+                value_digits=1,
+                ratio_digits=1,
+                show_ratio_interval=False,
+            ),
+            axis=1,
+        )
+        data = apply_location_order(data)
+        data[['location', 'GDP 2020', 'averageGDP', 'averagePOP', 'POP 2020', 'DALY 2020', 'DALY 2050', 'PREV 2020', 'PREV 2050']].to_csv(table3_path, index=False)
         self.INFODATA.to_csv('tmpresults/infodata.csv', index=False)
 
 
@@ -461,8 +850,8 @@ if __name__ == "__main__":
                         help='Disease selector: all, IHD, IS, PAD, full disease name, or comma-separated list')
     parser.add_argument('--output-tag', type=str, default=None,
                         help='Optional output tag for table file names (e.g., ALL, IHD, IS, PAD)')
-    parser.add_argument('--only-table1', action='store_true',
-                        help='Generate only Table1')
+    # parser.add_argument('--only-table1', action='store_true',
+    #                     help='Generate only Table1')
     args = parser.parse_args()
     # In[19]:
     mytable = Tables(
@@ -473,6 +862,5 @@ if __name__ == "__main__":
         output_tag=args.output_tag,
     )
     mytable.generate_table1()
-    if not args.only_table1:
-        mytable.generate_table2()
-        mytable.generate_table3()
+    mytable.generate_table2()
+    mytable.generate_table3()

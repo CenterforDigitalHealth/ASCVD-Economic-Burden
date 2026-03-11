@@ -118,14 +118,14 @@ python imputation.py \
   --output-tag "${DISEASE_TAG}" \
   2>&1 | tee "logs/log_imputation_${DISEASE_TAG}_allscen_d${DISCOUNT}_i${INFORMAL}.txt"
 
-echo "[4/4] Generate table 1"
+echo "[4/4] Generate tables"
 python generate_tables.py \
   -f "${IMPUTED_FILE}" \
   -d "${DISCOUNT}" \
   -i "${INFORMAL}" \
   --disease "${DISEASE}" \
   --output-tag "${DISEASE_TAG}" \
-  --only-table1 \
+  # --only-table1 \
   2>&1 | tee "logs/log_tables_${DISEASE_TAG}_allscen_d${DISCOUNT}_i${INFORMAL}.txt"
 
 echo "Done"
