@@ -1,6 +1,7 @@
 bigdata/*
 
 *.tmp
+.matplotlib-cache/*
 
 .DS*
 .ipynb*
@@ -16,3 +17,6 @@ tmpresults/*
 ~$*
 
 .vscode/*
+
+annual.ipynb
+annual_imputation_all_scenarios_disease_specific.xlsx
